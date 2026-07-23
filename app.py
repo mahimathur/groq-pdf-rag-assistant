@@ -1,132 +1,96 @@
-import streamlit as st
-import tempfile
 import os
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_groq import ChatGroq
+import tempfile
+import streamlit as st
 
-# ---------------------------------------------------------
-# 1. Page Configuration & Title
-# ---------------------------------------------------------
-st.set_page_config(page_title="Advanced Groq RAG Assistant", page_icon="⚡", layout="wide")
-st.title("⚡ Advanced Multi-PDF RAG Assistant (Powered by Groq)")
+# Load local .env file if available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-# ---------------------------------------------------------
-# 2. Sidebar Configuration (API Key & File Upload)
-# ---------------------------------------------------------
-with st.sidebar:
-    st.header("⚙️ Configuration")
-    api_key = st.text_input("Enter Groq API Key:", type="password", help="Get a free key from console.groq.com")
-    uploaded_files = st.file_uploader("Upload PDF Documents", type=["pdf"], accept_multiple_files=True)
-    process_btn = st.button("Process Documents", type="primary")
+from rag_core import process_pdf_and_query
 
-# ---------------------------------------------------------
-# 3. Document Processing Pipeline
-# ---------------------------------------------------------
-if process_btn:
-    if not api_key:
-        st.error("Please enter your Groq API key!")
-    elif not uploaded_files:
-        st.warning("Please upload at least one PDF document.")
+st.set_page_config(
+    page_title="PDF RAG Assistant",
+    page_icon="📄",
+    layout="wide"
+)
+
+st.title("📄 Groq-Powered PDF RAG Assistant")
+st.write("Upload a PDF to get an instant summary, ask questions, and view page-level citations.")
+
+# Sidebar Configuration
+st.sidebar.header("Configuration")
+
+# Fetch API key from Environment or Streamlit Secrets
+env_api_key = os.getenv("GROQ_API_KEY")
+if not env_api_key and "GROQ_API_KEY" in st.secrets:
+    env_api_key = st.secrets["GROQ_API_KEY"]
+
+# If API Key is found in environment/secrets, use it automatically!
+if env_api_key:
+    os.environ["GROQ_API_KEY"] = env_api_key
+    st.sidebar.success("🔑 API Key configured successfully!")
+else:
+    # Only show the input box if NO key was found in secrets/environment
+    api_key_input = st.sidebar.text_input(
+        "Enter Groq API Key",
+        type="password",
+        help="Paste your API key here to enable document processing."
+    )
+    if api_key_input:
+        os.environ["GROQ_API_KEY"] = api_key_input
+
+uploaded_file = st.sidebar.file_uploader("Upload a PDF document", type=["pdf"])
+
+if uploaded_file is not None:
+    if not os.getenv("GROQ_API_KEY"):
+        st.error("Please enter your Groq API Key in the sidebar to proceed.")
     else:
-        os.environ["GROQ_API_KEY"] = api_key
-        
-        with st.spinner("Processing PDFs, chunking text, and building vector index..."):
-            documents = []
-            for file in uploaded_files:
-                # Save uploaded file temporarily to read metadata
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-                    tmp_file.write(file.read())
-                    tmp_path = tmp_file.name
-                
-                loader = PyPDFLoader(tmp_path)
-                docs = loader.load()
-                # Preserve original filename in metadata
-                for doc in docs:
-                    doc.metadata["source_name"] = file.name
-                documents.extend(docs)
-                os.remove(tmp_path)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(uploaded_file.getvalue())
+            tmp_path = tmp_file.name
 
-            # Step A: Chunking
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-            splits = text_splitter.split_documents(documents)
+        st.sidebar.info(f"File '{uploaded_file.name}' ready for processing.")
 
-            # Step B: Local Embeddings & Vector Store
-            embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-            vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
-            st.session_state.retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-            
-            # Step C: Automatic Executive Summary Generation
-            llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.2)
-            sample_text = "\n".join([d.page_content[:400] for d in documents[:4]])
-            summary_prompt = f"Provide a clean, bulleted executive summary of these documents based on this excerpt:\n\n{sample_text}"
-            summary_res = llm.invoke(summary_prompt)
-            st.session_state.summary = summary_res.content
-            
-            st.success("Documents processed successfully!")
+        tab1, tab2 = st.tabs(["💬 Document Q&A", "⚡ Executive Summary"])
 
-# ---------------------------------------------------------
-# 4. Executive Summary Section
-# ---------------------------------------------------------
-if "summary" in st.session_state:
-    st.subheader("💡 Executive Summary")
-    st.info(st.session_state.summary)
+        with tab1:
+            st.subheader("Ask Questions About Your PDF")
+            user_query = st.text_input(
+                "Enter your question:",
+                placeholder="e.g., What are the main findings or key points in this report?"
+            )
 
-# ---------------------------------------------------------
-# 5. Interactive Chat & Citation Interface
-# ---------------------------------------------------------
-if "retriever" in st.session_state:
-    st.subheader("💬 Ask Questions Across Your Uploaded Documents")
-    
-    # Initialize Chat History
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+            if user_query:
+                with st.spinner("Retrieving relevant context and generating answer..."):
+                    try:
+                        answer, relevant_docs = process_pdf_and_query(tmp_path, user_query)
+                        
+                        st.markdown("### Answer")
+                        st.write(answer)
 
-    # Render Past Messages
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.write(msg["content"])
+                        st.markdown("---")
+                        st.markdown("### Source Citations")
+                        for idx, doc in enumerate(relevant_docs, 1):
+                            page_num = doc.metadata.get("page", 0) + 1
+                            with st.expander(f"Reference {idx} — Page {page_num}"):
+                                st.write(doc.page_content)
 
-    # Process User Input
-    user_query = st.chat_input("Ask a question about your uploaded PDFs...")
-    
-    if user_query:
-        st.session_state.messages.append({"role": "user", "content": user_query})
-        with st.chat_message("user"):
-            st.write(user_query)
+                    except Exception as e:
+                        st.error(f"An error occurred during query processing: {e}")
 
-        with st.chat_message("assistant"):
-            llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.2)
-            
-            # Retrieve Relevant Chunks
-            relevant_docs = st.session_state.retriever.invoke(user_query)
-            
-            # Construct Context with File & Page Citations
-            context_str = ""
-            sources_used = []
-            for doc in relevant_docs:
-                page = doc.metadata.get("page", 0) + 1
-                source = doc.metadata.get("source_name", "PDF")
-                context_str += f"\n[Source: {source}, Page {page}]:\n{doc.page_content}\n"
-                sources_used.append(f"**{source}** (Page {page})")
-
-            prompt = f"""Answer the question concisely based ONLY on the context below.
-If you cite facts, mention the page number where possible.
-
-Context:
-{context_str}
-
-Question: {user_query}
-"""
-            response = llm.invoke(prompt)
-            st.write(response.content)
-            
-            # Display Sources in an Expander Dropdown
-            with st.expander("📌 View Retrived Context & Page Citations"):
-                st.write("Information retrieved from:")
-                for s in set(sources_used):
-                    st.markdown(f"* {s}")
-
-        st.session_state.messages.append({"role": "assistant", "content": response.content})
+        with tab2:
+            st.subheader("Instant Document Summary")
+            if st.button("Generate Executive Summary"):
+                with st.spinner("Summarizing document..."):
+                    try:
+                        summary_query = "Provide a concise executive summary of this document, highlighting the key objectives, findings, and conclusions."
+                        summary, _ = process_pdf_and_query(tmp_path, summary_query)
+                        st.markdown("### Executive Summary")
+                        st.write(summary)
+                    except Exception as e:
+                        st.error(f"An error occurred during summarization: {e}")
+else:
+    st.info("👈 Upload a PDF file from the sidebar to get started!")
