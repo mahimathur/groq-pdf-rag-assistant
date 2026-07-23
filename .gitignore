@@ -1,0 +1,14 @@
+# Ignore local database & API secrets
+chroma_db/
+.env
+
+# Ignore Python runtime files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore local environment folders
+venv/
+.venv/
+env/
